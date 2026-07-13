@@ -52,17 +52,22 @@
       }
 
       var buildUrl = "Build";
-      var loaderUrl = buildUrl + "/amdabad.loader.js";
+      var loaderUrl = buildUrl + "/amdavad.loader.js";
       var config = {
         arguments: [],
-        dataUrl: buildUrl + "/amdabad.data.unityweb",
-        frameworkUrl: buildUrl + "/amdabad.framework.js.unityweb",
-        codeUrl: buildUrl + "/amdabad.wasm.unityweb",
+        dataUrl: buildUrl + "/amdavad.data.unityweb",
+        frameworkUrl: buildUrl + "/amdavad.framework.js.unityweb",
+        codeUrl: buildUrl + "/amdavad.wasm.unityweb",
         streamingAssetsUrl: "StreamingAssets",
         companyName: "DefaultCompany",
         productName: "BoardGames",
         productVersion: "1.0",
         showBanner: unityShowBanner,
+        devicePixelRatio: Math.min(
+          (/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+            (window.matchMedia && window.matchMedia('(pointer: coarse)').matches)) ? 1 : 2,
+          Math.max(1, window.devicePixelRatio || 1)
+        ),
         // errorHandler: function(err, url, line) {
         //    alert("error " + err + " occurred at line " + line);
         //    // Return 'true' if you handled this error and don't want Unity
@@ -109,6 +114,8 @@
       }
 
       document.querySelector("#unity-loading-bar").style.display = "block";
+
+      canvas.addEventListener('webglcontextlost', function (e) { e.preventDefault(); unityShowBanner('WebGL context lost.', 'error'); });
 
       var script = document.createElement("script");
       script.src = loaderUrl;

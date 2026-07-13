@@ -5,7 +5,7 @@
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
     <title>Unity Web Player | BoardGames</title>
     <link rel="shortcut icon" href="TemplateData/favicon.ico">
-    <link rel="stylesheet" href="TemplateData/style.css">
+    <style>html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#000}#unity-container{position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden}#unity-canvas{display:block;width:100%!important;height:100%!important;background:#000}#unity-loading-bar{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%)}#unity-footer{display:none!important}</style>
   </head>
   <body>
     <div id="unity-container" class="unity-desktop">
@@ -17,11 +17,11 @@
         </div>
       </div>
       <div id="unity-warning"> </div>
-      <!--<div id="unity-footer">
+      <div id="unity-footer">
         <div id="unity-logo-title-footer"></div>
         <div id="unity-fullscreen-button"></div>
         <div id="unity-build-title">BoardGames</div>
-      </div>-->
+      </div>
     </div>
     <script>
       var canvas = document.querySelector("#unity-canvas");
@@ -104,8 +104,8 @@
 
       } else {
         // Desktop style: Render the game canvas in a window that can be maximized to fullscreen:
-        canvas.style.width="100vw";
-        canvas.style.height="100vh";
+        canvas.style.width="100%";
+        canvas.style.height="100%";
       }
 
       document.querySelector("#unity-loading-bar").style.display = "block";
@@ -117,8 +117,7 @@
           document.querySelector("#unity-progress-bar-full").style.width = 100 * progress + "%";
               }).then((unityInstance) => {
                 document.querySelector("#unity-loading-bar").style.display = "none";
-                canvas.style.width="100vw";
-                canvas.style.height="100vh";
+                
 
               }).catch((message) => {
                 alert(message);

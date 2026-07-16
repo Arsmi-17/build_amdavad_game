@@ -20,7 +20,7 @@
    * version from here is compared against the platform's own at handshake. Bump it whenever
    * the wire protocol changes.
    */
-  var SDK_VERSION = "1.0.0";
+  var SDK_VERSION = "1.0.1";
 
   // ---- Acknowledgements ----------------------------------------------------
   //
@@ -185,8 +185,13 @@
       onPlayerLeft: function (handler) { return self.on("gamehub:pocket:player_left", handler); },
     };
     this.leaderboard = {
-      define: function (payload) { self.emit("gamehub:leaderboard:define", payload || {}); },
-      submitScore: function (payload) { self.emit("gamehub:leaderboard:score", payload || {}); },
+      // Declaring a board or posting a score IS using the leaderboard, so both mark it wired.
+      // Without this, a game that submits scores but never subscribes to onSharing reported
+      // leaderboard:false — the platform's assessment then showed "leaderboard not used" for a
+      // game visibly posting scores. (_wire is a no-op in Unity mode, where C# reports its own
+      // wiring; this is for web games, which infer wiring from what they call.)
+      define: function (payload) { self._wire("leaderboard"); self.emit("gamehub:leaderboard:define", payload || {}); },
+      submitScore: function (payload) { self._wire("leaderboard"); self.emit("gamehub:leaderboard:score", payload || {}); },
       onSharing: function (handler) { return self.on("gamehub:leaderboard:sharing", handler); },
     };
 
@@ -321,12 +326,16 @@
     // why this module being present in the SDK for everyone is harmless.
     this._casino = { pending: {}, seq: 0 };
 
-    this._onInternal("casino:result", function (payload) {
+    // The FULL event name, exactly as the platform sends it. This said "casino:result" and the
+    // platform sends "gamehub:casino:result", so the reply arrived, matched no handler, and every
+    // round hung on "Rolling…" for ever. Nothing threw — a promise that is never resolved is
+    // indistinguishable from one that is merely slow, which is why this looked like a hang and
+    // not like a bug.
+    this._onInternal("gamehub:casino:result", function (payload) {
       var key = payload && payload.roundKey;
-      var resolve = key ? self._casino.pending[key] : null;
-      if (!resolve) return;
-      delete self._casino.pending[key];
-      resolve(payload);
+      var entry = key ? self._casino.pending[key] : null;
+      if (!entry) return;
+      self._settleCasino(key, payload);
     });
 
     this.casino = {
@@ -354,10 +363,7 @@
         }
 
         var key = String(opts.roundKey || "").trim() || self._newRoundKey();
-        var promise = new Promise(function (resolve) {
-          self._casino.pending[key] = resolve;
-        });
-
+        var promise = self._awaitCasino(key);
         self.emit("gamehub:casino:round", { mode: mode, bet: bet, roundKey: key });
         return promise;
       },
@@ -365,7 +371,7 @@
       /** The current commitment: { serverSeedHash, clientSeed, nonce }. */
       seed: function () {
         var key = self._newRoundKey();
-        var promise = new Promise(function (resolve) { self._casino.pending[key] = resolve; });
+        var promise = self._awaitCasino(key);
         self.emit("gamehub:casino:seed", { roundKey: key });
         return promise;
       },
@@ -378,7 +384,7 @@
        */
       rotateSeed: function (clientSeed) {
         var key = self._newRoundKey();
-        var promise = new Promise(function (resolve) { self._casino.pending[key] = resolve; });
+        var promise = self._awaitCasino(key);
         self.emit("gamehub:casino:rotate", { roundKey: key, clientSeed: clientSeed || null });
         return promise;
       },
@@ -497,6 +503,47 @@
   // wallet:state either way, so a caller cannot tell "my spend landed" from "someone
   // else's did". Queue the resolvers and settle them all on the next reply: the
   // balance in it is authoritative regardless of which call produced it.
+  /**
+   * How long a round may go unanswered before we call it lost.
+   *
+   * A pending promise nobody ever resolves does not throw, does not log, and does not time out —
+   * it just sits there, and the game sits there with it, showing "Rolling…" for ever. That is
+   * exactly the bug that shipped here: the reply arrived under a name the SDK was not listening
+   * for, and the only symptom was a spinner.
+   *
+   * So a round now always ends. If the platform has not answered in this long, the promise
+   * rejects with something a developer can act on, instead of failing silently and looking slow.
+   */
+  var CASINO_TIMEOUT_MS = 20000;
+
+  /** Register a pending casino call, and guarantee it settles one way or the other. */
+  GameHubSDK.prototype._awaitCasino = function (key) {
+    var self = this;
+    return new Promise(function (resolve) {
+      var timer = setTimeout(function () {
+        self._settleCasino(key, {
+          roundKey: key,
+          ok: false,
+          code: "timeout",
+          error:
+            "The platform did not answer this round within " +
+            CASINO_TIMEOUT_MS / 1000 +
+            "s. The bet may or may not have been placed — retry with the SAME roundKey and you " +
+            "will get the original result rather than a second spin.",
+        });
+      }, CASINO_TIMEOUT_MS);
+      self._casino.pending[key] = { resolve: resolve, timer: timer };
+    });
+  };
+
+  GameHubSDK.prototype._settleCasino = function (key, payload) {
+    var entry = this._casino.pending[key];
+    if (!entry) return;
+    delete this._casino.pending[key];
+    if (entry.timer) clearTimeout(entry.timer);
+    entry.resolve(payload);
+  };
+
   // An idempotency key for one round. Uniqueness only has to hold per player, and the server
   // enforces it anyway (the column is UNIQUE) — this just has to not collide with itself.
   GameHubSDK.prototype._newRoundKey = function () {
@@ -917,8 +964,31 @@
     // dispatch of gamehub:audio:muted, and a throw in the game's mute handler happens down
     // there. It still has to count against the ack for set_mute.
     this._dispatchErrors = 0;
+
+    // Unity's ack id is parked BEFORE the dispatch, and only Unity's.
+    //
+    // SendMessage into Unity is synchronous, so the whole chain — .jslib handler, C#
+    // OnGameHubMuted, C# Ack(), ackEvent() — runs to completion inside _dispatch below.
+    // Parking afterwards meant ackEvent() looked for an id that had not been parked yet,
+    // found nothing, and took its `if (!id) return` — dropping the answer silently. The id
+    // was then parked for a reply that had already come and gone, so it sat there for ever
+    // and the platform never heard from the game at all.
+    //
+    // What it saw instead was the auto-ack from the probe sent before Unity had booted,
+    // which correctly reported handled:false — nothing was listening yet. That "no" was the
+    // game's only answer on record, while C# reported the wiring as present, and a game that
+    // handles mute perfectly failed to publish for not answering a question it had answered.
+    //
+    // The auto-ack path still runs AFTER the dispatch: it reads _dispatchErrors and the
+    // handler count, and both only mean anything once the handlers have actually run.
+    var id = typeof data.id === "string" ? data.id : null;
+    var parked = false;
+    if (id && !this._autoAck && UNITY_ACKS[eventType] && eventType !== ACK) {
+      this._unityAcks[eventType] = id;
+      parked = true;
+    }
     this._dispatch(eventType, payload);
-    if (typeof data.id === "string") this._maybeAck(data.id, eventType);
+    if (id && !parked) this._maybeAck(id, eventType);
   };
 
   GameHubSDK.prototype._dispatch = function (type, payload) {
